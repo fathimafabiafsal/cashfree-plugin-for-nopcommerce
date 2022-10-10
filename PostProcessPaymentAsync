@@ -1,0 +1,73 @@
+public async Task PostProcessPaymentAsync(PostProcessPaymentRequest postProcessPaymentRequest)
+        {
+            //get current store
+            var store = await _storeContext.GetCurrentStoreAsync();
+
+            //get current customer
+            var customer = await _workContext.GetCurrentCustomerAsync();
+
+            //get current order details
+            var order = (await _orderService.SearchOrdersAsync(store.Id,
+                customerId: customer.Id, pageSize: 1)).FirstOrDefault();
+
+            //get address of customer
+            var address = await _addressService.GetAddressByIdAsync(Convert.ToInt32(customer.BillingAddressId));
+
+            //get store location
+            var storeLocation = _webHelper.GetStoreLocation();
+
+            HttpRequestMessage request;
+            HttpResponseMessage response;
+            string responsebody;
+            var client = new HttpClient();
+            var url = _cashfreePaymentSettings.ActiveEnvironment == 0 ?
+                "https://sandbox.cashfree.com/pg/orders" :
+                "https://api.cashfree.com/pg/orders";      
+            
+            request = new HttpRequestMessage(HttpMethod.Post, url);
+            var stringdata = JsonConvert.SerializeObject(new CashfreeModel()
+            {
+                order_id = order.Id.ToString(),
+                order_amount = Convert.ToDouble(order.OrderTotal),
+                order_currency = order.CustomerCurrencyCode,
+                order_note = "order:"+ order.Id,
+                customer_details = new CustomerDetails()
+                {
+                    customer_id = customer.Id.ToString(),
+                    customer_name = address.FirstName,
+                    customer_email = customer.Email,
+                    customer_phone = address.PhoneNumber
+                },
+                order_meta = new OrderMeta()
+                { 
+                    return_url = $"{storeLocation}" + "Plugins/PaymentCashfreePayments/HandleResponse?order_id={order_id}&order_token={order_token}",                 
+                    notify_url = "https://1fde-2401-4900-1c5a-30ff-60a0-1b06-3e4d-5f5b.in.ngrok.io/Plugins/PaymentCashfreePayments/NotifyUrl",
+                    payment_methods = _cashfreePaymentSettings.PaymentMethods
+                }
+            });
+
+            var stringcontent = new StringContent(stringdata, Encoding.UTF8, "application/json");
+            request.Content = stringcontent;
+            List<NameValueHeaderValue> listheaders = new List<NameValueHeaderValue>();
+            listheaders.Add(new NameValueHeaderValue("x-api-version", _cashfreePaymentSettings.ApiVersion));
+            listheaders.Add(new NameValueHeaderValue("x-client-id", _cashfreePaymentSettings.AppID));
+            listheaders.Add(new NameValueHeaderValue("x-client-secret", _cashfreePaymentSettings.SecretKey));
+            foreach (var header in listheaders)
+            {
+                request.Headers.Add(header.Name, header.Value);
+            }
+
+            response = await client.SendAsync(request);
+            responsebody = await response.Content.ReadAsStringAsync();
+            dynamic result = JsonConvert.DeserializeObject<ResponseModel>(responsebody);
+
+            if (response.ReasonPhrase == "Bad Request" || response.ReasonPhrase == "BadRequest")
+            {
+                throw new Exception(await _localizationService.GetResourceAsync(responsebody));
+
+            }            
+            var payment_link = result.payment_link;
+
+            //redirecting to the payment_link
+            _httpContextAccessor.HttpContext.Response.Redirect(payment_link);
+        }
